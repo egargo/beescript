@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+
+
+from argparse import ArgumentParser
+import json
+import os
+from shutil import which
+import sys
+from typing import Any, Self
+
+
+RESERVED_KEYWORDS: set[str] = {"print"}
+
+
+class Lexer:
+    def __init__(self: Self, filename: str | None = None) -> None:
+        self.source: str = ""
+        self.char: str = ""
+        self.pos: int = 0
+        self.lexemes: list[dict[str, str]] = []
+
+        if filename is None:
+            raise Exception("Filename is empty")
+
+        with open(filename, "r") as f:
+            self.source = f.read()
+
+    def _read_ident(self: Self):
+        pos: int = self.pos
+        char: str = self.char
+        token: str = ""
+
+        while True:
+            char = self.source[pos]
+            if (
+                (not char.isalnum())
+                or (char == " ")
+                or (pos > len(self.source))
+            ):
+                break
+            token += char
+            pos += 1
+
+        token_type = (
+            "KEYWORD" if (token in RESERVED_KEYWORDS) else "IDENTIFIER"
+        )
+        self.lexemes.append({"kind": token_type, "value": token})
+        self.pos = pos - 1
+
+    def _read_integer(self: Self):
+        pos: int = self.pos
+        char: str = self.char
+        token: str = ""
+
+        while True:
+            char = self.source[pos]
+            if (
+                (not char.isdigit())
+                or (char == " ")
+                or (pos > len(self.source))
+            ):
+                break
+            token += char
+            pos += 1
+
+        self.lexemes.append({"kind": "INTEGER", "value": token})
+        self.pos = pos - 1
+
+    def _read_string(self: Self) -> None:
+        pos: int = self.pos + 1
+        char: str = self.char
+        token: str = ""
+
+        while True:
+            char = self.source[pos]
+            if (pos != self.pos and char == "\"") or (pos > len(self.source)):
+                break
+            token += char
+            pos += 1
+
+        self.lexemes.append({"kind": "STRING", "value": token})
+        self.pos = pos
+
+    def _read_comment(self: Self):
+        pos: int = self.pos
+        char: str = self.char
+        token: str = ""
+
+        if (
+            (char == "#")
+            and (pos + 1 < len(self.source))
+            and (self.source[pos + 1] == " ")
+        ):
+            pos += 2
+
+        while True:
+            char = self.source[pos]
+            if (char == "\n") or (pos > len(self.source)):
+                break
+            token += char
+            pos += 1
+
+        self.lexemes.append({"kind": "COMMENT", "value": token})
+        self.pos = pos
+
+    def lexer(self: Self) -> list[dict[str, str]]:
+        while self.pos != len(self.source):
+            self.char = self.source[self.pos]
+
+            if self.char == "\n":
+                self.lexemes.append({"kind": "ENDLINE", "value": "ENDLINE"})
+            elif self.char == "#":
+                self._read_comment()
+            elif self.char == "=":
+                self.lexemes.append(
+                    {"kind": "OPERATOR_ASSIGN", "value": self.char}
+                )
+            elif self.char == "\"":
+                self._read_string()
+            elif self.char == "(":
+                self.lexemes.append({"kind": "LEFT_PAREN", "value": self.char})
+            elif self.char == ")":
+                self.lexemes.append(
+                    {"kind": "RIGHT_PAREN", "value": self.char}
+                )
+            elif self.char.isalpha():
+                self._read_ident()
+            elif self.char.isdigit():
+                self._read_integer()
+
+            self.pos += 1
+
+        self.lexemes.append({"kind": "EOF", "value": "EOF"})
+        return self.lexemes
+
+
+class AST:
+    def __init__(self: Self, lexemes: list[dict[str, str]]) -> None:
+        self.lexemes: list[dict[str, str]] = lexemes
+        self.contents: list[dict[Any, Any]] = []
+        self.tree: dict[str, Any] = {
+            "Program": {"kind": "Program", "body": [], "comments": []}
+        }
+
+    def parse(self: Self):
+        body = {}
+
+        for index in range(0, len(self.lexemes)):
+            kind, value = self.lexemes[index].values()
+            match kind:
+                case "KEYWORD":
+                    body = {
+                        "kind": "ExpressionStatement",
+                        "expression": {
+                            "kind": "PrintKeyword",
+                            "base": {"kind": "Keyword", "name": value},
+                        },
+                    }
+                case "IDENTIFIER":
+                    body = {
+                        "kind": None,
+                        "expression": {
+                            "kind": "VariableDeclarator",
+                            "base": {"kind": "Identifier", "name": value},
+                        },
+                    }
+                case "STRING":
+                    body["expression"]["arguments"] = [
+                        {
+                            "kind": "StringLiteral",
+                            "value": value,
+                            "raw": f"\"{value}\"",
+                        }
+                    ]
+                case "INTEGER":
+                    body["expression"]["arguments"] = [
+                        {
+                            "kind": "IntegerLiteral",
+                            "value": value,
+                            "raw": value,
+                        }
+                    ]
+                case "OPERATOR_ASSIGN":
+                    body["kind"] = "AssignmentStatment"
+                case "ENDLINE":
+                    if body.get("kind") is not None:
+                        self.tree["Program"]["body"].append(body)
+                        body = {}
+
+                    if body != {} and body["kind"] is None:
+                        for tree_body in self.tree["Program"]["body"]:
+                            tbn = tree_body["expression"]["base"]["name"]
+                            bn = body["expression"]["base"]["name"]
+                            if tbn == bn:
+                                body["kind"] = "ExpressionStatement"
+                                body["expression"]["kind"] = "PrintKeyword"
+                                body["expression"]["base"]["kind"] = "Keyword"
+                                body["expression"]["arguments"] = []
+                                for i in tree_body["expression"]["arguments"]:
+                                    body["expression"]["arguments"].append(
+                                        {
+                                            "kind": i["kind"].replace(
+                                                "Literal", "Variable"
+                                            ),
+                                            "value": i["value"],
+                                            "raw": i["raw"],
+                                        }
+                                    )
+                case "COMMENT":
+                    self.tree["Program"]["comments"].append(
+                        {"kind": "Comment", "value": value}
+                    )
+                case "EOF":
+                    break
+                case _:
+                    break
+
+    def compile(self: Self):
+        out = ""
+
+        for line in self.tree["Program"]["body"]:
+            expr_kind = line["expression"]["kind"]
+            expr_base = line["expression"]["base"]["name"]
+            expr_args = [i for i in line["expression"]["arguments"]]
+
+            match expr_kind:
+                case "PrintKeyword":
+                    out += "\tprintf("
+                    for _args in expr_args:
+                        match _args["kind"]:
+                            case "StringLiteral":
+                                out += "\"%s\\n\", "
+                                out += _args["raw"]
+                                break
+                            case "IntegerLiteral":
+                                out += "\"%d\\n\", "
+                                out += _args["raw"]
+                                break
+                            case "IntegerVariable":
+                                out += "\"%d\\n\", "
+                                out += expr_base
+                                break
+                            case "StringVariable":
+                                out += "\"%d\\n\", "
+                                out += expr_base
+                                break
+                    out += ");\n"
+                case "VariableDeclarator":
+                    for _args in expr_args:
+                        match _args["kind"]:
+                            case "IntegerLiteral":
+                                out += "\tint "
+                                out += expr_base
+                                out += " = "
+                                out += _args["raw"]
+                                out += ";\n"
+                                break
+                            case "StringLiteral":
+                                out += "\tchar "
+                                out += expr_base
+                                out += "[] = "
+                                out += _args["raw"]
+                                out += ";\n"
+                                break
+
+        with open("main.c", "w") as f:
+            f.write(
+                "// NOTE: Generated by BeeScript. Don't edit manually.\n\n#include <stdio.h>\n\nint main() {\n"
+            )
+            f.write(out)
+            f.write("\treturn 0;\n}\n")
+
+    def dump(self: Self):
+        with open("bee.json", "w") as f:
+            f.write(json.dumps(self.tree, indent=4))
+
+
+if __name__ == "__main__":
+    if which("gcc") is None:
+        print("GCC is not installed")
+        sys.exit(1)
+
+    cli_args = ArgumentParser(prog="BeeScript", description="BeeScript, a language that compiles to C.")
+
+    cli_args.add_argument("filename", help="BeeScript program")
+    cli_args.add_argument("-d", "--dump", action="store_true", help="Dump BeeScript AST")
+
+    args = cli_args.parse_args()
+
+    if not os.path.isfile(args.filename):
+        print(f"{args.filename} does not exist")
+        sys.exit(1)
+
+    lexer = Lexer(args.filename)
+    tokens = lexer.lexer()
+
+    ast = AST(tokens)
+    ast.parse()
+    ast.compile()
+
+    if args.dump:
+        ast.dump()
+
+    sys.exit(0)
