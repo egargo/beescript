@@ -117,12 +117,6 @@ class Lexer:
                 )
             elif self.char == "\"":
                 self._read_string()
-            elif self.char == "(":
-                self.lexemes.append({"kind": "LEFT_PAREN", "value": self.char})
-            elif self.char == ")":
-                self.lexemes.append(
-                    {"kind": "RIGHT_PAREN", "value": self.char}
-                )
             elif self.char.isalpha():
                 self._read_ident()
             elif self.char.isdigit():
